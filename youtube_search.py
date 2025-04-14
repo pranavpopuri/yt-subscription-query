@@ -20,7 +20,7 @@ from nltk.stem import PorterStemmer
 
 # Import from our new modules
 from config import (
-    CLIENT_SECRETS_FILE, SCOPES, CACHE_FILE, MAX_RESULTS_PER_CHANNEL,
+    CLIENT_SECRETS_FILE, SCOPES, CACHE_FILE, MAX_RESULTS_PER_CHANNEL, 
     MAX_RELEVANT_CHANNELS, SECONDS_BETWEEN_REQUESTS, DAYS_BACK,
     TEST_CHANNEL_LIMIT, MIN_DESCRIPTION_LENGTH, MIN_VIEW_COUNT,
     MAX_DURATION, RESULTS_DIR, TEST_RESULTS_DIR
@@ -43,7 +43,8 @@ stop_words = set(stopwords.words('english'))
 def authenticate_youtube():
     """Authenticate with YouTube API using OAuth"""
     os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-    flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+    flow = google_auth_oauthlib.flow.Instal
+    ledAppFlow.from_client_secrets_file(
         CLIENT_SECRETS_FILE, SCOPES)
     credentials = flow.run_local_server(port=0)
     return googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
