@@ -52,8 +52,7 @@ def get_output_filename(test_mode=False):
 def authenticate_youtube():
     """Authenticate with YouTube API using OAuth"""
     os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-    flow = google_auth_oauthlib.flow.Instal
-    ledAppFlow.from_client_secrets_file(
+    flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
         CLIENT_SECRETS_FILE, SCOPES)
     credentials = flow.run_local_server(port=0)
     return googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
