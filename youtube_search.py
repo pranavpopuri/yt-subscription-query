@@ -24,8 +24,8 @@ CACHE_FILE = "youtube_search_cache.json"
 MAX_RESULTS_PER_CHANNEL = 15  # Increased from 10
 MAX_RELEVANT_CHANNELS = 50
 SECONDS_BETWEEN_REQUESTS = 0.1
-DAYS_BACK = 2000 
-TEST_CHANNEL_LIMIT = 1
+DAYS_BACK = 5000 
+TEST_CHANNEL_LIMIT = 2
 MIN_DESCRIPTION_LENGTH = 10
 MIN_VIEW_COUNT = 300  # Lowered from 500
 MAX_DURATION = 18000  # Increased from 10000 (5 hours)
@@ -64,22 +64,15 @@ def load_cache():
             cache = json.load(f)
             cache_date = datetime.fromisoformat(cache.get("cache_date", "2000-01-01")).replace(tzinfo=None)
             if datetime.now() - cache_date > timedelta(days=7):
-                # Return a new cache if the existing one is expired
                 return {
-                    "searches": {},  # Ensure 'searches' key is initialized
                     "channels": [],
                     "channel_descriptions": {},
                     "relevance_scores": {},
                     "cache_date": datetime.now().isoformat()
                 }
-            # Ensure 'searches' key exists in the loaded cache
-            if "searches" not in cache:
-                cache["searches"] = {}
             return cache
     except (FileNotFoundError, json.JSONDecodeError):
-        # Return a new cache if the file is missing or corrupted
         return {
-            "searches": {},  # Ensure 'searches' key is initialized
             "channels": [],
             "channel_descriptions": {},
             "relevance_scores": {},
@@ -151,9 +144,6 @@ def is_relevant_video(video_info, query_terms):
 
 def get_channel_metadata(youtube, channel_id, cache):
     """Fetch and cache channel metadata including name, description, and core topics."""
-    if not REGENERATE_KEYWORDS and channel_id in cache.get("channel_metadata", {}):
-        return cache["channel_metadata"][channel_id]
-
     try:
         # Fetch channel metadata
         response = youtube.channels().list(
@@ -172,18 +162,12 @@ def get_channel_metadata(youtube, channel_id, cache):
         # Generate core topics based on the description
         core_topics = generate_inference_based_keywords(description) if description.strip() else []
 
-        # Cache the metadata
-        metadata = {
+        # Return the metadata
+        return {
             "title": title,
             "description": description,
             "core_topics": core_topics
         }
-        if "channel_metadata" not in cache:
-            cache["channel_metadata"] = {}
-        cache["channel_metadata"][channel_id] = metadata
-        save_cache(cache)
-
-        return metadata
 
     except Exception as e:
         print(f"Error fetching metadata for channel {channel_id}: {e}")
@@ -251,11 +235,11 @@ def calculate_semantic_similarity(query, text):
 
     # Calculate cosine similarity
     similarity = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
-    return similarity * 100  # Convert to percentage
+    return round(similarity * 100, 2)  # Convert to percentage and truncate to 2 decimal places
 
-def get_channel_relevance_score(metadata, query):
+def get_channel_relevance_score(metadata, query, weights):
     """
-    Calculate channel relevance score with priorities:
+    Calculate channel relevance score with user-defined weights:
     1. Full-query matches in the description (highest weight)
     2. Single-word/phrase keyword matches in the description (medium weight)
     3. Title matches (lowest weight)
@@ -276,16 +260,29 @@ def get_channel_relevance_score(metadata, query):
     processed_query = preprocess_text(query)
 
     # 1. Full-query matches in the description
-    description_full_match = calculate_semantic_similarity(query, description)
+    if description.strip():
+        description_full_match = calculate_semantic_similarity(query, description)
+    else:
+        description_full_match = 0
 
     # 2. Single-word/phrase keyword matches in the description
-    description_keyword_match = sum(1 for keyword in core_topics if keyword in preprocess_text(description)) * 10
+    if description.strip():
+        description_keyword_match = sum(1 for keyword in core_topics if keyword in preprocess_text(description)) * 10
+    else:
+        description_keyword_match = 0
 
-    # 3. Title matches
-    title_similarity = calculate_semantic_similarity(query, title) if title.strip() else 0
+    # 3. Title matches (only consider if description is empty)
+    if not description.strip():
+        title_similarity = calculate_semantic_similarity(query, title) if title.strip() else 0
+    else:
+        title_similarity = 0
 
     # Weighted combined score
-    total_score = (description_full_match * 0.5) + (description_keyword_match * 0.3) + (title_similarity * 0.2)
+    total_score = (
+        (description_full_match * weights["description_weight"]) +
+        (description_keyword_match * weights["keyword_weight"]) +
+        (title_similarity * weights["title_weight"])
+    )
 
     return {
         "total_score": total_score,
@@ -294,7 +291,7 @@ def get_channel_relevance_score(metadata, query):
         "title_similarity": title_similarity
     }
 
-def get_most_relevant_channels(youtube, channels, query, cache):
+def get_most_relevant_channels(youtube, channels, query, cache, weights):
     """Return the top most relevant channels based on description and title matches."""
     print(f"\nEvaluating relevance for {len(channels)} channels...")
 
@@ -304,7 +301,7 @@ def get_most_relevant_channels(youtube, channels, query, cache):
         if not metadata:
             continue
 
-        score_details = get_channel_relevance_score(metadata, query)
+        score_details = get_channel_relevance_score(metadata, query, weights)
         channel_scores.append((score_details, channel))
         print(f"  {channel['title'][:30]}... Score: {score_details['total_score']:.1f}", end='\r')
 
@@ -402,8 +399,6 @@ def filter_videos_by_date(videos, days_back):
 def search_channel_videos(youtube, channel, query, cache):
     """Retrieve all videos from a channel and return the top 50 relevant ones."""
     channel_id = channel["id"]
-    cache_key = f"{channel_id}:{query.lower()}"
-    
     videos = []
     query_terms = expand_query_terms(query)
 
@@ -474,10 +469,6 @@ def search_channel_videos(youtube, channel, query, cache):
         videos.sort(key=lambda x: x["views"], reverse=True)
         videos = videos[:50]
 
-        # Cache the results
-        cache["searches"][cache_key] = videos
-        save_cache(cache)
-
     except Exception as e:
         print(f"Error processing {channel['title']}: {e}")
 
@@ -525,6 +516,28 @@ def export_to_csv(results, query, test_mode=False):
 
     print(f"\nResults saved to: {filename}")
 
+def get_user_weights():
+    """Prompt the user to input weights for description, title, and keyword similarity."""
+    print("\nSet the weights for relevance scoring:")
+    while True:
+        try:
+            description_weight = float(input("Enter weight for Description Similarity (e.g., 1.0): ").strip())
+            keyword_weight = float(input("Enter weight for Keyword Similarity (e.g., 0.25): ").strip())
+            title_weight = float(input("Enter weight for Title Similarity (e.g., 0.1): ").strip())
+
+            # Ensure weights are non-negative
+            if description_weight < 0 or keyword_weight < 0 or title_weight < 0:
+                print("Weights must be non-negative. Please try again.")
+                continue
+
+            return {
+                "description_weight": description_weight,
+                "keyword_weight": keyword_weight,
+                "title_weight": title_weight
+            }
+        except ValueError:
+            print("Invalid input. Please enter numeric values for the weights.")
+
 def main():
     print("YouTube Channel Search Tool")
     print("--------------------------")
@@ -536,11 +549,14 @@ def main():
     while not query:
         query = input("Please enter a valid query: ").strip()
 
+    # Get user-defined weights
+    weights = get_user_weights()
+
     cache = load_cache()
     all_channels = get_subscribed_channels(youtube, cache)
 
     # Get most relevant channels first
-    relevant_channels = get_most_relevant_channels(youtube, all_channels, query, cache)
+    relevant_channels = get_most_relevant_channels(youtube, all_channels, query, cache, weights)
 
     # Limit to 3 channels in test mode
     if test_mode:
@@ -554,11 +570,11 @@ def main():
 
     for i, (score_details, channel) in enumerate(relevant_channels, 1):
         print(f"\nProcessing {i}/{len(relevant_channels)}: {channel['title'][:30]}...")
-        print(f"  Core Topics: {score_details.get('core_topics', [])}")
         print(f"  Relevance Score:")
         print(f"    Description Similarity: {score_details['description_full_match']}%")
         print(f"    Keyword Similarity: {score_details['description_keyword_match']}%")
-        print(f"    Title Matches: {'True' if score_details['title_similarity'] > 0 else 'False'}")
+        if not channel.get("description", "").strip():
+            print(f"    Title Matches (used due to empty description): {'True' if score_details['title_similarity'] > 0 else 'False'}")
         print(f"    Total Score: {score_details['total_score']:.1f}")
 
         channel_videos = search_channel_videos(youtube, channel, query, cache)
@@ -581,19 +597,21 @@ def main():
     export_to_csv(results, query, test_mode)
 
     print(f"\nSearch complete! Found {len(results)} videos")
-    print(f"Total videos processed: {total_videos_processed}")
     print(f"Total quota used: ~{total_quota_used} units")
 
 def estimate_channel_quota_usage(videos_processed):
     """Estimate the API quota usage for a single channel."""
     # 1 quota unit per 50 videos for playlistItems.list
-    playlist_items_quota = (videos_processed // 50) + 1
+    playlist_items_quota = (videos_processed + 49) // 50  # Round up
 
     # 1 quota unit per 50 videos for videos.list
-    video_details_quota = (videos_processed // 50) + 1
+    video_details_quota = (videos_processed + 49) // 50  # Round up
+
+    # 100 quota units for fetching channel metadata (channels.list)
+    channel_metadata_quota = 100
 
     # Total quota usage for this channel
-    return playlist_items_quota + video_details_quota
+    return playlist_items_quota + video_details_quota + channel_metadata_quota
 
 if __name__ == "__main__":
     ensure_directories()

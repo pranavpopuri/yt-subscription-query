@@ -23,3 +23,8 @@ Improve keyword generation
 
 ---
 
+### 4/15
+Is it possible, after the list of relevant channels is gathered, to take a test group of 5 vidoes from that channel, determine if they are relevant to the query, and if they are not, to discard that channel and replace it with the next relevant channel (do this up to 5 times). For example, for the query "machine learning", the channel "marco learning" was returned
+
+Improve keyword generation. For example, "statquest with josh starmer" should generate statistics as a keyword. This keyword generation method can be extrapolating, it sholud not just repeat the descritpion words again.
+
