@@ -84,19 +84,19 @@ def categorize_channel(description, title):
     'statistics': ['statistics', 'stats', 'probability', 'regression'],
     'math': ['math', 'mathematics', 'linear algebra', 'number theory'],
     'Cars/machines': ['cars', 'automotive', 'engine', 'vehicle dynamics', 'racing', 'car'],
-    'video games': ['video games', 'game development', 'speedrun'],
+    'video games': ['video games', 'game development', 'speedrun', ],
     'music': ['music production', 'audio engineering', 'music theory', 'music'],
     'economics': ['economics']
   }
 
   # Tier 3: Broad categories (last resort)
   broad_categories = {
-    'programming': ['programming', 'coding', 'code', 'tech', 'computers', 'computer science', 'computer', 'software', 'software engineering'],
-    'engineering': ['engineering', 'mechanical', 'aerospace'],
+    'programming': ['programming', 'development', 'coding', 'code', 'tech', 'computers', 'computer science', 'computer', 'software', 'software engineering', 'java', 'c++', 'python', 'linux', 'app', 'windows', 'mac'],
+    'engineering': ['engineering', 'mechanical', 'aerospace', 'engineer'],
     'STEM': ['stem', 'science education', 'technology', 'physics', 'chemistry'],
-    'food/cooking': ['cooking', 'food recipe', 'culinary arts', 'cook', 'chef'],
+    'food/cooking': ['cooking', 'food recipe', 'culinary arts', 'cook', 'chef', 'baker', 'baking', 'desserts', 'dessert', 'food'],
     'Fitness': ['fitness', 'workout routine', 'strength training', 'running', 'mobility', 'endurance', 'strength', 'workout', 'knee', 'athlete', 'nutrition'],
-    'Life Improvement': ['self-improvement', 'productivity', 'time management', 'management', 'advice'],
+    'Life Improvement': ['self-improvement', 'productivity', 'time management', 'management', 'advice', 'self-development'],
     'comedy': ['comedy', 'skit', 'funny', 'fun']
 
   }
