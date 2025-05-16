@@ -69,7 +69,7 @@ def categorize_channel(description, title):
 
   # Tier 1: Most specific categories (checked first)
   specialized_categories = {
-    'leetcode': ['leetcode', 'interview', 'competitive programming'],
+    'leetcode': ['leetcode', 'interview', 'competitive programming', 'algorithm', 'algorithms'],
     'machine learning': ['machine learning', 'deep learning', 'neural network', 'llm', 'computer vision', 'ai'],
     'data science': ['data science', 'data analysis', 'data visualization', 'data pipeline', 'data'],
     'robotics': ['robotics', 'autonomous', 'slam'],
@@ -86,8 +86,7 @@ def categorize_channel(description, title):
     'Cars/machines': ['cars', 'automotive', 'engine', 'vehicle dynamics', 'racing', 'car'],
     'video games': ['video games', 'game development', 'speedrun'],
     'music': ['music production', 'audio engineering', 'music theory', 'music'],
-    'economics': ['economics'],
-    'comedy': ['comedy', 'skit', 'funny', 'fun']
+    'economics': ['economics']
   }
 
   # Tier 3: Broad categories (last resort)
@@ -97,7 +96,9 @@ def categorize_channel(description, title):
     'STEM': ['stem', 'science education', 'technology', 'physics', 'chemistry'],
     'food/cooking': ['cooking', 'food recipe', 'culinary arts', 'cook', 'chef'],
     'Fitness': ['fitness', 'workout routine', 'strength training', 'running', 'mobility', 'endurance', 'strength', 'workout', 'knee', 'athlete', 'nutrition'],
-    'Life Improvement': ['self-improvement', 'productivity', 'time management', 'management', 'advice']
+    'Life Improvement': ['self-improvement', 'productivity', 'time management', 'management', 'advice'],
+    'comedy': ['comedy', 'skit', 'funny', 'fun']
+
   }
 
   # Check all categories in order of priority, using whole word matching

@@ -28,3 +28,8 @@ Is it possible, after the list of relevant channels is gathered, to take a test 
 
 Improve keyword generation. For example, "statquest with josh starmer" should generate statistics as a keyword. This keyword generation method can be extrapolating, it sholud not just repeat the descritpion words again.
 
+---
+
+### 5/15
+
+Take output from categorize_channels and feed it to youtube_search to improve youtube_search results.
