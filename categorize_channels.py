@@ -2,14 +2,26 @@ import os
 import json
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 import re
-from pathlib import Path
+from functools import lru_cache
+from nltk.stem import PorterStemmer
+from youtube_search import get_video_sample_text, load_cache, save_cache
+
+_stemmer = PorterStemmer()
+
+@lru_cache(maxsize=None)
+def _stem_word(word: str) -> str:
+    return _stemmer.stem(word)
+
+def _stem(text: str) -> str:
+    """Stem every word in text so keyword matching is form-agnostic."""
+    return ' '.join(_stem_word(w) for w in re.findall(r'[a-z]+', text.lower()))
 
 # Configuration
-CLIENT_SECRETS_FILE = "C:\\Users\\hipra\\Downloads\\client_secret_REDACTED_CLIENT_ID.json"
+CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 OUTPUT_JSON = "youtube_channels_categorized.json"
+CATEGORIES_CONFIG_FILE = "categories_config.json"
 
 # YouTube API quota costs
 QUOTA_COSTS = {
@@ -63,53 +75,46 @@ def get_all_subscribed_channels(youtube, quota_tracker):
     return channels
 
 
-def categorize_channel(description, title):
-  """Categorization with all categories in priority tiers, allowing whole word matches only."""
-  full_text = f"{title.lower()} {description.lower()}"
+def load_categories_config():
+    try:
+        with open(CATEGORIES_CONFIG_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
 
-  # Tier 1: Most specific categories (checked first)
-  specialized_categories = {
-    'leetcode': ['leetcode', 'interview', 'competitive programming', 'algorithm', 'algorithms'],
-    'machine learning': ['machine learning', 'deep learning', 'neural network', 'llm', 'computer vision', 'ai'],
-    'data science': ['data science', 'data analysis', 'data visualization', 'data pipeline', 'data'],
-    'robotics': ['robotics', 'autonomous', 'slam'],
-    'CAD': ['cad', 'computer aided design', 'solidworks', 'fusion 360', 'design', '3d'],
-    'chess': ['chess', 'grandmaster', 'chess opening', 'endgame'],
-    'basketball': ['basketball', 'nba', 'wnba', 'hoops'],
-    'cybersecurity': ['cybersecurity']
-  }
 
-  # Tier 2: Medium specificity
-  medium_categories = {
-    'statistics': ['statistics', 'stats', 'probability', 'regression'],
-    'math': ['math', 'mathematics', 'linear algebra', 'number theory'],
-    'Cars/machines': ['cars', 'automotive', 'engine', 'vehicle dynamics', 'racing', 'car'],
-    'video games': ['video games', 'game development', 'speedrun', ],
-    'music': ['music production', 'audio engineering', 'music theory', 'music'],
-    'economics': ['economics']
-  }
+def categorize_channel(description, title, config=None, title_only=False):
+    """Categorization with priority tiers loaded from categories_config.json.
 
-  # Tier 3: Broad categories (last resort)
-  broad_categories = {
-    'programming': ['programming', 'development', 'coding', 'code', 'tech', 'computers', 'computer science', 'computer', 'software', 'software engineering', 'java', 'c++', 'python', 'linux', 'app', 'windows', 'mac'],
-    'engineering': ['engineering', 'mechanical', 'aerospace', 'engineer'],
-    'STEM': ['stem', 'science education', 'technology', 'physics', 'chemistry'],
-    'food/cooking': ['cooking', 'food recipe', 'culinary arts', 'cook', 'chef', 'baker', 'baking', 'desserts', 'dessert', 'food'],
-    'Fitness': ['fitness', 'workout routine', 'strength training', 'running', 'mobility', 'endurance', 'strength', 'workout', 'knee', 'athlete', 'nutrition'],
-    'Life Improvement': ['self-improvement', 'productivity', 'time management', 'management', 'advice', 'self-development'],
-    'comedy': ['comedy', 'skit', 'funny', 'fun']
+    Both the channel text and each keyword are stemmed before matching, so
+    word-form variants (robot/robots/robotic/robotics, code/coding/coder, etc.)
+    all resolve to the same stem and match each other automatically.
 
-  }
+    Pass title_only=True to force threshold 1 across all tiers — titles are
+    too short to reliably hit the configured broad threshold.
+    """
+    if config is None:
+        config = load_categories_config()
+    if config is None:
+        return 'miscellaneous'
 
-  # Check all categories in order of priority, using whole word matching
-  for category_group in [specialized_categories, medium_categories, broad_categories]:
-    for category, keywords in category_group.items():
-      for kw in keywords:
-        # Use regex to match whole words or exact phrases
-        pattern = r'\b' + re.escape(kw) + r'\b'
-        if re.search(pattern, full_text):
-          return category
-  return 'miscellaneous'
+    stemmed_text = _stem(f"{title} {description}")
+
+    if title_only:
+        min_matches = {"specialized": 1, "medium": 1, "broad": 1}
+    else:
+        min_matches = config.get("min_matches", {"specialized": 1, "medium": 1, "broad": 1})
+
+    for tier in ["specialized", "medium", "broad"]:
+        threshold = min_matches.get(tier, 1)
+        for category, keywords in config.get(tier, {}).items():
+            hits = sum(
+                1 for kw in keywords
+                if re.search(r'\b' + re.escape(_stem(kw)) + r'\b', stemmed_text)
+            )
+            if hits >= threshold:
+                return category
+    return 'miscellaneous'
 
 
 
@@ -157,6 +162,10 @@ def main():
         'channels': {}
     }
 
+    config = load_categories_config()
+    cache = load_cache()
+
+    # Pass 1: categorize from channel description + title
     temp_categories = {}
     for channel in channels:
         desc = channel['description'].strip()
@@ -164,13 +173,26 @@ def main():
         if not desc:
             category = 'no description'
         else:
-            category = categorize_channel(desc, title)
-            # If miscellaneous, try with title only
+            category = categorize_channel(desc, title, config=config)
             if category == 'miscellaneous':
-                category = categorize_channel('', title)
-        if category not in temp_categories:
-            temp_categories[category] = []
-        temp_categories[category].append(channel)
+                category = categorize_channel('', title, config=config, title_only=True)
+        temp_categories.setdefault(category, []).append(channel)
+
+    # Pass 2: for anything still uncategorized, sample 5 recent videos and retry
+    unresolved = (
+        temp_categories.pop('no description', []) +
+        temp_categories.pop('miscellaneous', [])
+    )
+    if unresolved:
+        print(f"\nSampling videos for {len(unresolved)} uncategorized channels...")
+        for channel in unresolved:
+            sample = get_video_sample_text(youtube, channel['id'], cache)
+            if sample:
+                category = categorize_channel(sample, channel['title'], config=config)
+            else:
+                category = 'miscellaneous'
+            temp_categories.setdefault(category, []).append(channel)
+        save_cache(cache)
 
     # Ensure "no description" is first in the export
     all_categories = list(temp_categories.keys())

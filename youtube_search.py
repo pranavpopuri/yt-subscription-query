@@ -1,4 +1,3 @@
-from pathlib import Path
 import googleapiclient.discovery
 import google_auth_oauthlib.flow
 from datetime import datetime, timedelta
@@ -6,19 +5,16 @@ import csv
 import json
 import time
 import os
-from collections import defaultdict
 import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-from nltk.stem import PorterStemmer  # Added for word stemming
+from nltk.stem import PorterStemmer
 from nltk.corpus import stopwords
-from nltk.corpus import wordnet
 from nltk.tokenize import word_tokenize
 from nltk import pos_tag
 
 # Configuration
-CLIENT_SECRETS_FILE = "C:\\Users\\hipra\\Downloads\\client_secret_REDACTED_CLIENT_ID.json"
+CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 CACHE_FILE = "youtube_search_cache.json"
 MAX_RESULTS_PER_CHANNEL = 15  # Increased from 10
@@ -28,14 +24,12 @@ DAYS_BACK = 5000
 TEST_CHANNEL_LIMIT = 2
 MIN_DESCRIPTION_LENGTH = 10
 MIN_VIEW_COUNT = 300  # Lowered from 500
+MIN_DURATION = 60    # Exclude Shorts and clips under 1 minute
 MAX_DURATION = 18000  # Increased from 10000 (5 hours)
 
 # Output directories
 RESULTS_DIR = "youtube_results"
 TEST_RESULTS_DIR = "test_results"
-
-# Global setting for keyword regeneration
-REGENERATE_KEYWORDS = input("Do you want to regenerate keywords for this run? (y/n): ").strip().lower() == 'y'
 
 def ensure_directories():
     """Create both output directories if they don't exist"""
@@ -104,7 +98,7 @@ def parse_duration(duration_str):
             seconds = int(seconds_part)
 
         return hours * 3600 + minutes * 60 + seconds
-    except:
+    except (ValueError, AttributeError):
         return 0
 
 def preprocess_text(text):
@@ -136,16 +130,16 @@ def is_relevant_video(video_info, query_terms):
     title_score = sum(1 for term in query_terms if term in title)
     desc_score = sum(1 for term in query_terms if term in description)
 
-    # Consider a video relevant if:
-    # - At least 1 term in the title, OR
-    # - At least 2 terms in the description, OR
-    # - A combined score of 2 or more across title and description
-    return (title_score >= 1) or (desc_score >= 2) or (title_score + desc_score >= 2)
+    return (title_score >= 1) or (desc_score >= 2)
 
 def get_channel_metadata(youtube, channel_id, cache):
-    """Fetch and cache channel metadata including name, description, and core topics."""
+    """Return channel metadata, hitting the API only on first access per channel."""
+    channel_descriptions = cache.setdefault("channel_descriptions", {})
+
+    if channel_id in channel_descriptions:
+        return channel_descriptions[channel_id]
+
     try:
-        # Fetch channel metadata
         response = youtube.channels().list(
             part="snippet",
             id=channel_id,
@@ -158,16 +152,11 @@ def get_channel_metadata(youtube, channel_id, cache):
         snippet = response["items"][0]["snippet"]
         title = snippet.get("title", "")
         description = snippet.get("description", "")
-
-        # Generate core topics based on the description
         core_topics = generate_inference_based_keywords(description) if description.strip() else []
 
-        # Return the metadata
-        return {
-            "title": title,
-            "description": description,
-            "core_topics": core_topics
-        }
+        metadata = {"title": title, "description": description, "core_topics": core_topics}
+        channel_descriptions[channel_id] = metadata
+        return metadata
 
     except Exception as e:
         print(f"Error fetching metadata for channel {channel_id}: {e}")
@@ -362,6 +351,45 @@ def get_uploads_playlist_id(youtube, channel_id):
         print(f"Error fetching uploads playlist for channel {channel_id}: {e}")
         return None
 
+def get_video_sample_text(youtube, channel_id, cache, n=5):
+    """Return combined title+description text from the n most recent videos.
+
+    Used to categorize channels whose own description is empty or vague.
+    Costs 2 quota units per channel (playlist ID lookup + one page of videos)
+    and caches the result so subsequent runs cost nothing.
+    """
+    video_samples = cache.setdefault("video_samples", {})
+    if channel_id in video_samples:
+        return video_samples[channel_id]
+
+    try:
+        playlist_id = get_uploads_playlist_id(youtube, channel_id)
+        if not playlist_id:
+            video_samples[channel_id] = ""
+            return ""
+
+        response = youtube.playlistItems().list(
+            part="snippet",
+            playlistId=playlist_id,
+            maxResults=n,
+            fields="items(snippet(title,description))"
+        ).execute()
+
+        parts = []
+        for item in response.get("items", []):
+            snippet = item.get("snippet", {})
+            parts.append(snippet.get("title", ""))
+            parts.append(snippet.get("description", ""))
+
+        text = " ".join(filter(None, parts))
+        video_samples[channel_id] = text
+        return text
+
+    except Exception as e:
+        print(f"Error sampling videos for channel {channel_id}: {e}")
+        video_samples[channel_id] = ""
+        return ""
+
 def get_all_videos_from_playlist(youtube, playlist_id):
     """Retrieve all videos from a playlist."""
     videos = []
@@ -454,7 +482,7 @@ def search_channel_videos(youtube, channel, query, cache):
             duration = details.get("contentDetails", {}).get("duration", "PT0M")
             duration_sec = parse_duration(duration)
 
-            if view_count >= MIN_VIEW_COUNT and duration_sec <= MAX_DURATION:
+            if view_count >= MIN_VIEW_COUNT and MIN_DURATION <= duration_sec <= MAX_DURATION:
                 videos.append({
                     "title": video["title"],
                     "channel": channel["title"],
@@ -542,6 +570,7 @@ def main():
     print("YouTube Channel Search Tool")
     print("--------------------------")
 
+    regenerate_keywords = input("Do you want to regenerate keywords for this run? (y/n): ").strip().lower() == 'y'
     test_mode = input("Run in test mode? (y/n): ").strip().lower() == 'y'
     youtube = authenticate_youtube()
 
