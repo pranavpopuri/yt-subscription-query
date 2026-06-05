@@ -96,10 +96,16 @@ def categorize_channel(description, title, config=None, title_only=False):
     Pass title_only=True to force threshold 1 across all tiers — titles are
     too short to reliably hit the configured broad threshold.
     """
+    category, _ = _categorize_with_reason(description, title, config, title_only)
+    return category
+
+
+def _categorize_with_reason(description, title, config=None, title_only=False):
+    """Like categorize_channel, but returns (category, reason_str) for debug output."""
     if config is None:
         config = load_categories_config()
     if config is None:
-        return 'miscellaneous'
+        return 'miscellaneous', 'no config'
 
     stemmed_text = _stem(f"{title} {description}")
 
@@ -111,13 +117,13 @@ def categorize_channel(description, title, config=None, title_only=False):
     for tier in ["specialized", "medium", "broad"]:
         threshold = min_matches.get(tier, 1)
         for category, keywords in config.get(tier, {}).items():
-            hits = sum(
-                1 for kw in keywords
+            matched = [
+                kw for kw in keywords
                 if re.search(r'\b' + re.escape(_stem(kw)) + r'\b', stemmed_text)
-            )
-            if hits >= threshold:
-                return category
-    return 'miscellaneous'
+            ]
+            if len(matched) >= threshold:
+                return category, f"tier={tier}  keywords={matched}"
+    return 'miscellaneous', 'no tier matched'
 
 
 
@@ -167,38 +173,48 @@ def main():
     }
 
     config = load_categories_config()
-    video_samples = cache_mod.load_video_samples()
 
     # Pass 1: categorize from channel description + title
     temp_categories = {}
+    print("\n--- Pass 1: description + title ---")
     for channel in channels:
         desc = channel['description'].strip()
         title = channel['title']
         if not desc:
-            category = 'no description'
+            category, reason = 'no description', 'empty description'
         else:
-            category = categorize_channel(desc, title, config=config)
+            category, reason = _categorize_with_reason(desc, title, config=config)
             if category == 'miscellaneous':
-                category = categorize_channel('', title, config=config, title_only=True)
+                cat2, reason2 = _categorize_with_reason('', title, config=config, title_only=True)
+                if cat2 != 'miscellaneous':
+                    category, reason = cat2, f"title-only  {reason2}"
+        print(f"  [{category}] {title!r}  —  {reason}")
         temp_categories.setdefault(category, []).append(channel)
 
-    # Pass 2: for anything still uncategorized, sample 5 recent videos and retry
+    # Pass 2: for anything still uncategorized, use video index then fall back to API
     unresolved = (
         temp_categories.pop('no description', []) +
         temp_categories.pop('miscellaneous', [])
     )
     if unresolved:
-        print(f"\nSampling videos for {len(unresolved)} uncategorized channels...")
+        video_index = cache_mod.load_video_index()
+        print(f"\n--- Pass 2: video titles ({len(unresolved)} channels) ---")
         for channel in unresolved:
-            sample = get_video_sample_text(youtube, channel['id'], video_samples)
-            if sample:
+            index_data = video_index.get(channel['id'])
+            if index_data:
+                sample = ' '.join(v['title'] for v in index_data.get('videos', []))
+                source = f"index ({len(index_data.get('videos', []))} videos)"
+            else:
+                sample = get_video_sample_text(youtube, channel['id'], {}, n=20)
                 quota_tracker.add_quota('channels.list')
                 quota_tracker.add_quota('playlistItems.list')
-                category = categorize_channel(sample, channel['title'], config=config)
+                source = "API"
+            if sample:
+                category, reason = _categorize_with_reason(sample, channel['title'], config=config)
             else:
-                category = 'miscellaneous'
+                category, reason = 'miscellaneous', 'no video sample'
+            print(f"  [{category}] {channel['title']!r}  —  {source}  {reason}")
             temp_categories.setdefault(category, []).append(channel)
-        cache_mod.save_video_samples(video_samples)
 
     # Ensure "no description" is first in the export
     all_categories = list(temp_categories.keys())

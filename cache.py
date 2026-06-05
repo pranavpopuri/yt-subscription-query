@@ -109,3 +109,14 @@ def load_video_index():
 
 def save_video_index(data):
     _write(_path("video_index.json"), data)
+
+
+# ── Playlist index ─────────────────────────────────────────────────────────────
+# Per-channel playlist index for fast local search.
+# Shape: { channel_id: { channel_title, last_fetched, playlists: [{id, title}] } }
+
+def load_playlist_index():
+    return _read(_path("playlist_index.json"), {})
+
+def save_playlist_index(data):
+    _write(_path("playlist_index.json"), data)

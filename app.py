@@ -60,7 +60,9 @@ defaults = {
     "categories": {},
     "categories_config": None,
     "search_results": [],
+    "playlist_results": [],
     "search_mode": "Fast (index)",
+    "categorize_debug_log": [],
     "to_remove": set(),
 }
 for k, v in defaults.items():
@@ -199,6 +201,7 @@ with tab_categorize:
     from categorize_channels import (
         get_all_subscribed_channels,
         categorize_channel,
+        _categorize_with_reason,
         load_categories_config,
         export_to_json,
         QuotaTracker,
@@ -216,21 +219,25 @@ with tab_categorize:
             channels = get_all_subscribed_channels(youtube, quota_tracker)
 
         config = load_categories_config()
-        video_samples = cache_mod.load_video_samples()
 
         # Pass 1: categorize from description + title
         progress = st.progress(0, text="Categorizing channels…")
         temp_categories = {}
+        debug_log = []
         for i, channel in enumerate(channels):
             progress.progress((i + 1) / len(channels), text=f"Categorizing: {channel['title'][:40]}")
             desc = channel["description"].strip()
             title = channel["title"]
             if not desc:
-                category = "no description"
+                category, reason, signal = "no description", "empty description", "none"
             else:
-                category = categorize_channel(desc, title, config=config)
+                category, reason = _categorize_with_reason(desc, title, config=config)
+                signal = "description"
                 if category == "miscellaneous":
-                    category = categorize_channel("", title, config=config, title_only=True)
+                    cat2, reason2 = _categorize_with_reason("", title, config=config, title_only=True)
+                    if cat2 != "miscellaneous":
+                        category, reason, signal = cat2, reason2, "title-only"
+            debug_log.append({"channel": title, "pass": 1, "signal": signal, "category": category, "reason": reason})
             temp_categories.setdefault(category, []).append(channel)
         progress.empty()
 
@@ -240,20 +247,28 @@ with tab_categorize:
             temp_categories.pop("miscellaneous", [])
         )
         if unresolved:
+            video_index = cache_mod.load_video_index()
             progress2 = st.progress(0, text=f"Sampling videos for {len(unresolved)} uncategorized channels…")
             for i, channel in enumerate(unresolved):
                 progress2.progress(
                     (i + 1) / len(unresolved),
                     text=f"Sampling: {channel['title'][:40]}"
                 )
-                sample = get_video_sample_text(youtube, channel["id"], video_samples)
-                if sample:
-                    category = categorize_channel(sample, channel["title"], config=config)
+                index_data = video_index.get(channel["id"])
+                if index_data:
+                    sample = " ".join(v["title"] for v in index_data.get("videos", []))
+                    signal = f"index ({len(index_data.get('videos', []))} videos)"
                 else:
-                    category = "miscellaneous"
+                    sample = get_video_sample_text(youtube, channel["id"], {}, n=20)
+                    signal = "API"
+                if sample:
+                    category, reason = _categorize_with_reason(sample, channel["title"], config=config)
+                else:
+                    category, reason = "miscellaneous", "no video sample"
+                    signal = "none"
+                debug_log.append({"channel": channel["title"], "pass": 2, "signal": signal, "category": category, "reason": reason})
                 temp_categories.setdefault(category, []).append(channel)
             progress2.empty()
-            cache_mod.save_video_samples(video_samples)
 
         ordered = ["no description", "miscellaneous"] + [
             c for c in temp_categories if c not in ("no description", "miscellaneous")
@@ -276,6 +291,7 @@ with tab_categorize:
             cat: [ch["title"] for ch in temp_categories.get(cat, [])]
             for cat in ordered
         }
+        st.session_state.categorize_debug_log = debug_log
         st.success(
             f"Categorized {len(channels)} channels · "
             f"{quota_tracker.get_quota_used()} quota units used"
@@ -303,6 +319,23 @@ with tab_categorize:
                 cols = st.columns(3)
                 for i, name in enumerate(sorted(channels)):
                     cols[i % 3].write(name)
+
+        # ── Categorization debug log ───────────────────────────────────────────
+        if st.session_state.categorize_debug_log:
+            with st.expander(f"Categorization log  ({len(st.session_state.categorize_debug_log)} channels)"):
+                df_log = pd.DataFrame(st.session_state.categorize_debug_log)
+                st.dataframe(
+                    df_log,
+                    column_config={
+                        "channel":  st.column_config.TextColumn("Channel", width="medium"),
+                        "pass":     st.column_config.NumberColumn("Pass", width="small"),
+                        "signal":   st.column_config.TextColumn("Signal", width="medium"),
+                        "category": st.column_config.TextColumn("Category", width="medium"),
+                        "reason":   st.column_config.TextColumn("Reason", width="large"),
+                    },
+                    width="stretch",
+                    hide_index=True,
+                )
 
         # ── Miscellaneous inspector ────────────────────────────────────────────
         if os.path.exists(OUTPUT_JSON):
@@ -346,8 +379,10 @@ with tab_search:
         get_channel_relevance_score,
         search_channel_videos,
         fetch_channel_videos,
+        fetch_channel_playlists_with_ids,
         get_new_channel_videos,
         search_with_index,
+        search_playlists_with_index,
         MAX_RELEVANT_CHANNELS,
     )
 
@@ -359,7 +394,10 @@ with tab_search:
     n_indexed = len(video_index)
     n_videos = sum(len(d.get("videos", [])) for d in video_index.values())
 
-    with st.expander("Video index", expanded=n_indexed == 0):
+    playlist_index = cache_mod.load_playlist_index()
+    n_playlists = sum(len(d.get("playlists", [])) for d in playlist_index.values())
+
+    with st.expander("Search index", expanded=n_indexed == 0):
         if n_indexed == 0:
             st.info("No index built yet. Build it once to enable fast search (~5 quota units per channel).")
         else:
@@ -367,39 +405,49 @@ with tab_search:
                 (d.get("last_fetched", "") for d in video_index.values()), default=""
             )
             st.success(
-                f"{n_indexed} channels · {n_videos:,} videos · "
+                f"{n_indexed} channels · {n_videos:,} videos · {n_playlists:,} playlists · "
                 f"last updated {last_updated[:10]}"
             )
 
         col_build, col_refresh = st.columns(2)
-        if col_build.button("Build index", help="Full fetch: up to 200 recent videos per subscribed channel."):
+        if col_build.button("Build index", help="Full fetch: up to 200 recent videos + all playlists per channel."):
             subscriptions = cache_mod.load_subscriptions()
             with st.spinner("Loading subscriptions…"):
                 channels = get_subscribed_channels(youtube, subscriptions)
                 cache_mod.save_subscriptions(channels)
 
             new_index = {}
+            new_playlist_index = {}
             prog = st.progress(0, text="Building index…")
             for i, ch in enumerate(channels):
                 prog.progress((i + 1) / len(channels), text=f"Indexing: {ch['title'][:40]}")
                 videos = fetch_channel_videos(youtube, ch["id"])
+                playlists = fetch_channel_playlists_with_ids(youtube, ch["id"])
                 new_index[ch["id"]] = {
                     "channel_title": ch["title"],
                     "last_fetched": datetime.utcnow().isoformat() + "Z",
                     "videos": videos,
                 }
+                new_playlist_index[ch["id"]] = {
+                    "channel_title": ch["title"],
+                    "last_fetched": datetime.utcnow().isoformat() + "Z",
+                    "playlists": playlists,
+                }
             prog.empty()
             cache_mod.save_video_index(new_index)
+            cache_mod.save_playlist_index(new_playlist_index)
             total_vids = sum(len(d["videos"]) for d in new_index.values())
-            st.success(f"Indexed {len(new_index)} channels · {total_vids:,} videos")
+            total_pls = sum(len(d["playlists"]) for d in new_playlist_index.values())
+            st.success(f"Indexed {len(new_index)} channels · {total_vids:,} videos · {total_pls:,} playlists")
             st.rerun()
 
         if col_refresh.button(
             "Refresh index",
             disabled=n_indexed == 0,
-            help="Incremental: fetches only videos newer than the last build.",
+            help="Incremental: fetches only videos newer than the last build. Rebuilds playlist index.",
         ):
             idx = cache_mod.load_video_index()
+            new_playlist_index = {}
             prog = st.progress(0, text="Refreshing…")
             channel_ids = list(idx.keys())
             added = 0
@@ -412,9 +460,16 @@ with tab_search:
                     data["videos"] = new_vids + data["videos"]
                     added += len(new_vids)
                 data["last_fetched"] = datetime.utcnow().isoformat() + "Z"
+                playlists = fetch_channel_playlists_with_ids(youtube, cid)
+                new_playlist_index[cid] = {
+                    "channel_title": data["channel_title"],
+                    "last_fetched": data["last_fetched"],
+                    "playlists": playlists,
+                }
             prog.empty()
             cache_mod.save_video_index(idx)
-            st.success(f"Added {added} new videos across {len(channel_ids)} channels")
+            cache_mod.save_playlist_index(new_playlist_index)
+            st.success(f"Added {added} new videos · rebuilt playlist index")
             st.rerun()
 
     # ── Search controls ───────────────────────────────────────────────────────
@@ -450,10 +505,13 @@ with tab_search:
     if st.button("Search", type="primary", disabled=not bool(query)):
         if search_mode == "Fast (index)":
             idx = cache_mod.load_video_index()
+            pl_idx = cache_mod.load_playlist_index()
             with st.spinner("Searching index…"):
                 results = search_with_index(query, idx, youtube)
+                pl_results = search_playlists_with_index(query, pl_idx)
             st.session_state.search_results = results
-            st.success(f"Found {len(results)} videos")
+            st.session_state.playlist_results = pl_results
+            st.success(f"Found {len(results)} videos · {len(pl_results)} playlists")
         else:
             weights = {
                 "description_weight": desc_w,
@@ -498,7 +556,22 @@ with tab_search:
             search_progress.empty()
 
             st.session_state.search_results = results
+            st.session_state.playlist_results = []
             st.success(f"Found {len(results)} videos across {len(relevant)} channels")
+
+    if st.session_state.playlist_results:
+        st.subheader("Playlists")
+        df_pl = pd.DataFrame(st.session_state.playlist_results)[["title", "channel", "url"]]
+        st.dataframe(
+            df_pl,
+            column_config={
+                "title":   st.column_config.TextColumn("Playlist", width="large"),
+                "channel": st.column_config.TextColumn("Channel"),
+                "url":     st.column_config.LinkColumn("Link", display_text="Open"),
+            },
+            width="stretch",
+            hide_index=True,
+        )
 
     if st.session_state.search_results:
         results = st.session_state.search_results
@@ -515,7 +588,7 @@ with tab_search:
                 "published_at": st.column_config.TextColumn("Published"),
                 "url":          st.column_config.LinkColumn("Link", display_text="Watch"),
             },
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 

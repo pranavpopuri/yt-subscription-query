@@ -4,12 +4,19 @@ import math
 import time
 import os
 import re
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.metrics.pairwise import cosine_similarity
 from nltk.stem import PorterStemmer
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk import pos_tag
+
+_stemmer = PorterStemmer()
+
+def _stem_tokenize(text):
+    tokens = re.findall(r'[a-z]+', text.lower())
+    return [_stemmer.stem(t) for t in tokens if t not in ENGLISH_STOP_WORDS]
+
 
 MAX_RELEVANT_CHANNELS = 50
 SECONDS_BETWEEN_REQUESTS = 0.1
@@ -255,6 +262,27 @@ def get_channel_playlists(youtube, channel_id, playlist_names):
     return titles
 
 
+def fetch_channel_playlists_with_ids(youtube, channel_id):
+    """Fetch all playlists for a channel, returning [{id, title}]."""
+    playlists = []
+    next_page_token = None
+    try:
+        while True:
+            response = youtube.playlists().list(
+                part="snippet", channelId=channel_id, maxResults=50,
+                pageToken=next_page_token,
+                fields="items(id,snippet/title),nextPageToken"
+            ).execute()
+            for item in response.get("items", []):
+                playlists.append({"id": item["id"], "title": item["snippet"]["title"]})
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break
+    except Exception as e:
+        print(f"Error fetching playlists for channel {channel_id}: {e}")
+    return playlists
+
+
 def get_video_sample_text(youtube, channel_id, video_samples, n=5):
     """Return sample text from recent videos, fetching from API on first access."""
     if channel_id in video_samples:
@@ -462,7 +490,7 @@ def search_with_index(query, video_index, youtube):
 
     titles = [e[1]["title"] for e in entries]
     try:
-        vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
+        vectorizer = TfidfVectorizer(analyzer=_stem_tokenize, ngram_range=(1, 2))
         tfidf = vectorizer.fit_transform([query] + titles)
         scores = cosine_similarity(tfidf[0:1], tfidf[1:])[0]
     except Exception:
@@ -508,6 +536,45 @@ def search_with_index(query, video_index, youtube):
     for r in results:
         del r["_score"]
     return results
+
+
+def search_playlists_with_index(query, playlist_index):
+    """Search cached playlist titles with TF-IDF.
+
+    Zero quota cost. Returns list of {title, channel, url} dicts.
+    """
+    entries = []
+    for channel_id, data in playlist_index.items():
+        channel_title = data.get("channel_title", channel_id)
+        for p in data.get("playlists", []):
+            entries.append((channel_title, p))
+
+    if not entries:
+        return []
+
+    titles = [e[1]["title"] for e in entries]
+    try:
+        vectorizer = TfidfVectorizer(analyzer=_stem_tokenize, ngram_range=(1, 2))
+        tfidf = vectorizer.fit_transform([query] + titles)
+        scores = cosine_similarity(tfidf[0:1], tfidf[1:])[0]
+    except Exception:
+        return []
+
+    results = []
+    for i, score in enumerate(scores):
+        if score > 0:
+            channel_title, playlist = entries[i]
+            results.append({
+                "title": playlist["title"],
+                "channel": channel_title,
+                "url": f"https://www.youtube.com/playlist?list={playlist['id']}",
+                "_score": score,
+            })
+
+    results.sort(key=lambda x: x["_score"], reverse=True)
+    for r in results:
+        del r["_score"]
+    return results[:50]
 
 
 def export_to_csv(results, query, test_mode=False):
