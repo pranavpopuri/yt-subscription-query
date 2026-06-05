@@ -1,3 +1,4 @@
+import json
 import re
 from functools import lru_cache
 from nltk.stem import PorterStemmer
