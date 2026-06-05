@@ -22,7 +22,7 @@ def authenticate_youtube():
 
 
 def fetch_subscriptions(youtube):
-    """Return a dict mapping channel title (lowercase) → subscription ID."""
+    """Return a dict mapping channel title → subscription ID."""
     print("Fetching your subscriptions from YouTube...")
     subs = {}
     next_page_token = None

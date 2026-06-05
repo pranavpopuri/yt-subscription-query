@@ -25,7 +25,9 @@ CATEGORIES_CONFIG_FILE = "categories_config.json"
 
 # YouTube API quota costs
 QUOTA_COSTS = {
-    'subscriptions.list': 1,  # per page (50 items)
+    'subscriptions.list': 1,   # per page (50 items)
+    'channels.list': 1,
+    'playlistItems.list': 1,   # per page (50 items)
 }
 
 
@@ -64,7 +66,7 @@ def get_all_subscribed_channels(youtube, quota_tracker):
             channels.append({
                 'id': item['snippet']['resourceId']['channelId'],
                 'title': item['snippet']['title'],
-                'description': item['snippet']['description'].lower(),
+                'description': item['snippet']['description'],
                 'url': f"https://youtube.com/channel/{item['snippet']['resourceId']['channelId']}"
             })
 
@@ -188,6 +190,9 @@ def main():
         for channel in unresolved:
             sample = get_video_sample_text(youtube, channel['id'], cache)
             if sample:
+                # get_video_sample_text costs 1 unit (channels.list) + 1 unit (playlistItems.list)
+                quota_tracker.add_quota('channels.list')
+                quota_tracker.add_quota('playlistItems.list')
                 category = categorize_channel(sample, channel['title'], config=config)
             else:
                 category = 'miscellaneous'
