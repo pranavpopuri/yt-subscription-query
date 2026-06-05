@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import csv
+import math
 import time
 import os
 import re
@@ -364,6 +365,149 @@ def search_channel_videos(youtube, channel, query):
     except Exception as e:
         print(f"Error processing {channel['title']}: {e}")
         return []
+
+
+def fetch_channel_videos(youtube, channel_id, max_videos=200):
+    """Fetch up to max_videos recent video titles for a channel.
+
+    Returns list of {id, title, published_at} dicts.
+    Quota: 1 unit (channels.list) + ceil(max_videos/50) units (playlistItems.list).
+    """
+    playlist_id = get_uploads_playlist_id(youtube, channel_id)
+    if not playlist_id:
+        return []
+    videos = []
+    next_page_token = None
+    while len(videos) < max_videos:
+        try:
+            response = youtube.playlistItems().list(
+                part="snippet",
+                playlistId=playlist_id,
+                maxResults=min(50, max_videos - len(videos)),
+                pageToken=next_page_token,
+                fields="items(snippet(resourceId/videoId,title,publishedAt)),nextPageToken",
+            ).execute()
+            for item in response.get("items", []):
+                snippet = item["snippet"]
+                videos.append({
+                    "id": snippet["resourceId"]["videoId"],
+                    "title": snippet.get("title", ""),
+                    "published_at": snippet.get("publishedAt", ""),
+                })
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break
+        except Exception as e:
+            print(f"Error fetching videos for channel {channel_id}: {e}")
+            break
+    return videos
+
+
+def get_new_channel_videos(youtube, channel_id, since_iso):
+    """Fetch videos published strictly after since_iso (ISO 8601 string).
+
+    Returns list of {id, title, published_at} dicts, newest first.
+    Stops as soon as a video older than since_iso is encountered.
+    Quota: 1 unit (channels.list) + pages until cutoff is reached.
+    """
+    playlist_id = get_uploads_playlist_id(youtube, channel_id)
+    if not playlist_id:
+        return []
+    videos = []
+    next_page_token = None
+    while True:
+        try:
+            response = youtube.playlistItems().list(
+                part="snippet",
+                playlistId=playlist_id,
+                maxResults=50,
+                pageToken=next_page_token,
+                fields="items(snippet(resourceId/videoId,title,publishedAt)),nextPageToken",
+            ).execute()
+            done = False
+            for item in response.get("items", []):
+                snippet = item["snippet"]
+                pub = snippet.get("publishedAt", "")
+                if pub <= since_iso:
+                    done = True
+                    break
+                videos.append({
+                    "id": snippet["resourceId"]["videoId"],
+                    "title": snippet.get("title", ""),
+                    "published_at": pub,
+                })
+            next_page_token = response.get("nextPageToken")
+            if done or not next_page_token:
+                break
+        except Exception as e:
+            print(f"Error fetching new videos for channel {channel_id}: {e}")
+            break
+    return videos
+
+
+def search_with_index(query, video_index, youtube):
+    """Search cached video titles with TF-IDF, then rank top results by views.
+
+    Costs ~2 quota units (videos.list for top 100 candidates) regardless of index size.
+    Returns list of result dicts in the same shape as search_channel_videos.
+    """
+    entries = []
+    for channel_id, data in video_index.items():
+        channel_title = data.get("channel_title", channel_id)
+        for v in data.get("videos", []):
+            entries.append((channel_title, v))
+
+    if not entries:
+        return []
+
+    titles = [e[1]["title"] for e in entries]
+    try:
+        vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
+        tfidf = vectorizer.fit_transform([query] + titles)
+        scores = cosine_similarity(tfidf[0:1], tfidf[1:])[0]
+    except Exception:
+        return []
+
+    top_indices = scores.argsort()[-100:][::-1]
+    candidates = [(scores[i], entries[i]) for i in top_indices if scores[i] > 0]
+    if not candidates:
+        return []
+
+    video_ids = [c[1][1]["id"] for c in candidates]
+    views_map = {}
+    for i in range(0, len(video_ids), 50):
+        batch = video_ids[i : i + 50]
+        try:
+            resp = youtube.videos().list(
+                part="statistics",
+                id=",".join(batch),
+                fields="items(id,statistics/viewCount)",
+            ).execute()
+            for item in resp.get("items", []):
+                views_map[item["id"]] = int(item.get("statistics", {}).get("viewCount", 0))
+        except Exception as e:
+            print(f"Error fetching view counts: {e}")
+
+    results = []
+    for rel_score, (channel_title, video) in candidates:
+        vid_id = video["id"]
+        views = views_map.get(vid_id, 0)
+        combined = rel_score * math.log10(max(views, 10))
+        results.append({
+            "title": video["title"],
+            "channel": channel_title,
+            "published_at": video.get("published_at", ""),
+            "views": views,
+            "duration": "N/A",
+            "url": f"https://youtube.com/watch?v={vid_id}",
+            "description": "",
+            "_score": combined,
+        })
+
+    results.sort(key=lambda x: x["_score"], reverse=True)
+    for r in results:
+        del r["_score"]
+    return results
 
 
 def export_to_csv(results, query, test_mode=False):

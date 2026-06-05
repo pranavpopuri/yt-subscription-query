@@ -1,6 +1,7 @@
 import os
 import json
 import time
+from datetime import datetime
 
 import streamlit as st
 import pandas as pd
@@ -59,6 +60,7 @@ defaults = {
     "categories": {},
     "categories_config": None,
     "search_results": [],
+    "search_mode": "Fast (index)",
     "to_remove": set(),
 }
 for k, v in defaults.items():
@@ -343,73 +345,160 @@ with tab_search:
         get_channel_playlists,
         get_channel_relevance_score,
         search_channel_videos,
+        fetch_channel_videos,
+        get_new_channel_videos,
+        search_with_index,
         MAX_RELEVANT_CHANNELS,
     )
 
     st.header("Search Videos")
     st.caption("Finds relevant videos across your subscribed channels without using the expensive search.list API.")
 
+    # ── Index management ──────────────────────────────────────────────────────
+    video_index = cache_mod.load_video_index()
+    n_indexed = len(video_index)
+    n_videos = sum(len(d.get("videos", [])) for d in video_index.values())
+
+    with st.expander("Video index", expanded=n_indexed == 0):
+        if n_indexed == 0:
+            st.info("No index built yet. Build it once to enable fast search (~5 quota units per channel).")
+        else:
+            last_updated = max(
+                (d.get("last_fetched", "") for d in video_index.values()), default=""
+            )
+            st.success(
+                f"{n_indexed} channels · {n_videos:,} videos · "
+                f"last updated {last_updated[:10]}"
+            )
+
+        col_build, col_refresh = st.columns(2)
+        if col_build.button("Build index", help="Full fetch: up to 200 recent videos per subscribed channel."):
+            subscriptions = cache_mod.load_subscriptions()
+            with st.spinner("Loading subscriptions…"):
+                channels = get_subscribed_channels(youtube, subscriptions)
+                cache_mod.save_subscriptions(channels)
+
+            new_index = {}
+            prog = st.progress(0, text="Building index…")
+            for i, ch in enumerate(channels):
+                prog.progress((i + 1) / len(channels), text=f"Indexing: {ch['title'][:40]}")
+                videos = fetch_channel_videos(youtube, ch["id"])
+                new_index[ch["id"]] = {
+                    "channel_title": ch["title"],
+                    "last_fetched": datetime.utcnow().isoformat() + "Z",
+                    "videos": videos,
+                }
+            prog.empty()
+            cache_mod.save_video_index(new_index)
+            total_vids = sum(len(d["videos"]) for d in new_index.values())
+            st.success(f"Indexed {len(new_index)} channels · {total_vids:,} videos")
+            st.rerun()
+
+        if col_refresh.button(
+            "Refresh index",
+            disabled=n_indexed == 0,
+            help="Incremental: fetches only videos newer than the last build.",
+        ):
+            idx = cache_mod.load_video_index()
+            prog = st.progress(0, text="Refreshing…")
+            channel_ids = list(idx.keys())
+            added = 0
+            for i, cid in enumerate(channel_ids):
+                data = idx[cid]
+                prog.progress((i + 1) / len(channel_ids),
+                              text=f"Refreshing: {data['channel_title'][:40]}")
+                new_vids = get_new_channel_videos(youtube, cid, data["last_fetched"])
+                if new_vids:
+                    data["videos"] = new_vids + data["videos"]
+                    added += len(new_vids)
+                data["last_fetched"] = datetime.utcnow().isoformat() + "Z"
+            prog.empty()
+            cache_mod.save_video_index(idx)
+            st.success(f"Added {added} new videos across {len(channel_ids)} channels")
+            st.rerun()
+
+    # ── Search controls ───────────────────────────────────────────────────────
     query = st.text_input("Search query", placeholder="e.g. dynamic programming, transformer architecture")
 
-    with st.expander("Scoring weights & limits"):
-        c1, c2, c3, c4 = st.columns(4)
-        desc_w = c1.slider("Description", 0.0, 2.0, 1.0, 0.05,
-                           help="Weight for full-description semantic similarity")
-        kw_w   = c2.slider("Keywords",    0.0, 1.0, 0.25, 0.05,
-                           help="Weight for keyword matches in description")
-        title_w = c3.slider("Title",      0.0, 1.0, 0.1, 0.05,
-                            help="Weight for title similarity (only used when description is empty)")
-        playlist_w = c4.slider("Playlists", 0.0, 1.0, 0.5, 0.05,
-                               help="Weight for playlist title matches")
-        max_channels = st.slider("Max channels to search", 1, MAX_RELEVANT_CHANNELS, 20)
+    if n_indexed > 0:
+        search_mode = st.radio(
+            "Search mode",
+            ["Fast (index)", "Deep (channel-first)"],
+            horizontal=True,
+            key="search_mode",
+            help=(
+                "**Fast**: searches cached video titles locally, ~2 quota units. "
+                "**Deep**: ranks channels by description then fetches videos, ~500 quota units."
+            ),
+        )
+    else:
+        search_mode = "Deep (channel-first)"
+
+    if search_mode == "Deep (channel-first)":
+        with st.expander("Scoring weights & limits"):
+            c1, c2, c3, c4 = st.columns(4)
+            desc_w = c1.slider("Description", 0.0, 2.0, 1.0, 0.05,
+                               help="Weight for full-description semantic similarity")
+            kw_w   = c2.slider("Keywords",    0.0, 1.0, 0.25, 0.05,
+                               help="Weight for keyword matches in description")
+            title_w = c3.slider("Title",      0.0, 1.0, 0.1, 0.05,
+                                help="Weight for title similarity (only used when description is empty)")
+            playlist_w = c4.slider("Playlists", 0.0, 1.0, 0.5, 0.05,
+                                   help="Weight for playlist title matches")
+            max_channels = st.slider("Max channels to search", 1, MAX_RELEVANT_CHANNELS, 20)
 
     if st.button("Search", type="primary", disabled=not bool(query)):
-        weights = {
-            "description_weight": desc_w,
-            "keyword_weight": kw_w,
-            "title_weight": title_w,
-            "playlist_weight": playlist_w,
-        }
-        subscriptions    = cache_mod.load_subscriptions()
-        channel_metadata = cache_mod.load_channel_metadata()
-        playlist_names   = cache_mod.load_playlist_names()
+        if search_mode == "Fast (index)":
+            idx = cache_mod.load_video_index()
+            with st.spinner("Searching index…"):
+                results = search_with_index(query, idx, youtube)
+            st.session_state.search_results = results
+            st.success(f"Found {len(results)} videos")
+        else:
+            weights = {
+                "description_weight": desc_w,
+                "keyword_weight": kw_w,
+                "title_weight": title_w,
+                "playlist_weight": playlist_w,
+            }
+            subscriptions    = cache_mod.load_subscriptions()
+            channel_metadata = cache_mod.load_channel_metadata()
+            playlist_names   = cache_mod.load_playlist_names()
 
-        with st.spinner("Loading subscriptions…"):
-            channels = get_subscribed_channels(youtube, subscriptions)
+            with st.spinner("Loading subscriptions…"):
+                channels = get_subscribed_channels(youtube, subscriptions)
 
-        # Rank channels with a progress bar
-        rank_progress = st.progress(0, text=f"Ranking {len(channels)} channels…")
-        channel_scores = []
-        for i, channel in enumerate(channels):
-            rank_progress.progress((i + 1) / len(channels),
-                                   text=f"Ranking: {channel['title'][:40]}")
-            metadata = get_channel_metadata(youtube, channel["id"], channel_metadata)
-            if not metadata:
-                continue
-            playlist_titles = get_channel_playlists(youtube, channel["id"], playlist_names)
-            score = get_channel_relevance_score(metadata, query, weights, playlist_titles)
-            channel_scores.append((score, channel))
-        channel_scores.sort(reverse=True, key=lambda x: x[0]["total_score"])
-        relevant = channel_scores[:max_channels]
-        rank_progress.empty()
-        cache_mod.save_subscriptions(subscriptions.get("channels", []))
-        cache_mod.save_channel_metadata(channel_metadata)
-        cache_mod.save_playlist_names(playlist_names)
+            rank_progress = st.progress(0, text=f"Ranking {len(channels)} channels…")
+            channel_scores = []
+            for i, channel in enumerate(channels):
+                rank_progress.progress((i + 1) / len(channels),
+                                       text=f"Ranking: {channel['title'][:40]}")
+                metadata = get_channel_metadata(youtube, channel["id"], channel_metadata)
+                if not metadata:
+                    continue
+                playlist_titles = get_channel_playlists(youtube, channel["id"], playlist_names)
+                score = get_channel_relevance_score(metadata, query, weights, playlist_titles)
+                channel_scores.append((score, channel))
+            channel_scores.sort(reverse=True, key=lambda x: x[0]["total_score"])
+            relevant = channel_scores[:max_channels]
+            rank_progress.empty()
+            cache_mod.save_subscriptions(subscriptions.get("channels", []))
+            cache_mod.save_channel_metadata(channel_metadata)
+            cache_mod.save_playlist_names(playlist_names)
 
-        # Search each channel
-        results = []
-        search_progress = st.progress(0, text="Searching channels…")
-        for i, (score_details, channel) in enumerate(relevant):
-            search_progress.progress(
-                (i + 1) / len(relevant),
-                text=f"Searching: {channel['title'][:40]}"
-            )
-            videos = search_channel_videos(youtube, channel, query)
-            results.extend(videos[:20])
-        search_progress.empty()
+            results = []
+            search_progress = st.progress(0, text="Searching channels…")
+            for i, (score_details, channel) in enumerate(relevant):
+                search_progress.progress(
+                    (i + 1) / len(relevant),
+                    text=f"Searching: {channel['title'][:40]}"
+                )
+                videos = search_channel_videos(youtube, channel, query)
+                results.extend(videos[:20])
+            search_progress.empty()
 
-        st.session_state.search_results = results
-        st.success(f"Found {len(results)} videos across {len(relevant)} channels")
+            st.session_state.search_results = results
+            st.success(f"Found {len(results)} videos across {len(relevant)} channels")
 
     if st.session_state.search_results:
         results = st.session_state.search_results

@@ -98,3 +98,14 @@ def load_channel_urls():
 
 def save_channel_urls(data):
     _write(_path("channel_urls.json"), data)
+
+
+# ── Video index ────────────────────────────────────────────────────────────────
+# Per-channel title index for fast local search. Titles only — no descriptions.
+# Shape: { channel_id: { channel_title, last_fetched, videos: [{id, title, published_at}] } }
+
+def load_video_index():
+    return _read(_path("video_index.json"), {})
+
+def save_video_index(data):
+    _write(_path("video_index.json"), data)

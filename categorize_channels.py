@@ -1,11 +1,23 @@
 import json
 import re
+import ssl
+import time
 from functools import lru_cache
 from nltk.stem import PorterStemmer
 from youtube_search import get_video_sample_text
 import cache as cache_mod
 
 _stemmer = PorterStemmer()
+
+
+def _execute_with_retry(request, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return request.execute()
+        except ssl.SSLError:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
 
 @lru_cache(maxsize=None)
 def _stem_word(word: str) -> str:
@@ -44,12 +56,12 @@ def get_all_subscribed_channels(youtube, quota_tracker):
 
     while True:
         quota_tracker.add_quota('subscriptions.list')
-        response = youtube.subscriptions().list(
+        response = _execute_with_retry(youtube.subscriptions().list(
             part="snippet",
             mine=True,
             maxResults=50,
             pageToken=next_page_token
-        ).execute()
+        ))
 
         for item in response['items']:
             channels.append({
