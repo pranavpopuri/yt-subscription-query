@@ -17,10 +17,9 @@ from nltk import pos_tag
 CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 CACHE_FILE = "youtube_search_cache.json"
-MAX_RESULTS_PER_CHANNEL = 15  # Increased from 10
 MAX_RELEVANT_CHANNELS = 50
 SECONDS_BETWEEN_REQUESTS = 0.1
-DAYS_BACK = 5000 
+DAYS_BACK = 365
 TEST_CHANNEL_LIMIT = 2
 MIN_DESCRIPTION_LENGTH = 10
 MIN_VIEW_COUNT = 300  # Lowered from 500
@@ -126,9 +125,8 @@ def is_relevant_video(video_info, query_terms):
     title = preprocess_text(video_info["title"])
     description = preprocess_text(video_info["description"])
 
-    # Score based on term matches
-    title_score = sum(1 for term in query_terms if term in title)
-    desc_score = sum(1 for term in query_terms if term in description)
+    title_score = sum(1 for term in query_terms if re.search(rf'\b{re.escape(term)}\b', title))
+    desc_score = sum(1 for term in query_terms if re.search(rf'\b{re.escape(term)}\b', description))
 
     return (title_score >= 1) or (desc_score >= 2)
 
@@ -190,25 +188,6 @@ def generate_inference_based_keywords(description, n=5):
 
     return ranked_keywords[:n]
 
-def filter_and_rank_keywords(keywords, context):
-    """Filter and rank keywords based on their relevance to the context."""
-    stop_words = set(stopwords.words("english"))
-    context_words = set(context.split())
-    ranked_keywords = []
-
-    for keyword in keywords:
-        # Skip overly generic terms
-        if len(keyword) < 3 or keyword in stop_words:
-            continue
-
-        # Score keywords based on their presence in the context
-        score = sum(1 for word in keyword.split() if word in context_words)
-        ranked_keywords.append((score, keyword))
-
-    # Sort by score and return the keywords
-    ranked_keywords.sort(reverse=True, key=lambda x: x[0])
-    return [keyword for _, keyword in ranked_keywords]
-
 def calculate_semantic_similarity(query, text):
     """Calculate semantic similarity between query and text using TF-IDF."""
     if not text or len(text) < MIN_DESCRIPTION_LENGTH:
@@ -253,9 +232,10 @@ def get_channel_relevance_score(metadata, query, weights, playlist_titles=None):
     else:
         description_full_match = 0
 
-    # 2. Single-word/phrase keyword matches in the description
+    # 2. Channel topic words that appear in the query
+    processed_query = preprocess_text(query)
     if description.strip():
-        description_keyword_match = sum(1 for keyword in core_topics if keyword in preprocess_text(description)) * 10
+        description_keyword_match = sum(1 for keyword in core_topics if re.search(rf'\b{re.escape(keyword)}\b', processed_query)) * 10
     else:
         description_keyword_match = 0
 
@@ -534,19 +514,6 @@ def search_channel_videos(youtube, channel, query, cache):
 
     return videos
 
-def estimate_quota_usage(channels, total_videos):
-    """Estimate the API quota usage."""
-    # 1 quota unit per 50 videos for playlistItems.list
-    playlist_items_quota = len(channels) * (total_videos // 50 + 1)
-
-    # 1 quota unit per 50 videos for videos.list
-    video_details_quota = total_videos // 50 + 1
-
-    # Total quota usage
-    total_quota = playlist_items_quota + video_details_quota
-    print(f"Estimated quota usage: {total_quota} units")
-    return total_quota
-
 def export_to_csv(results, query, test_mode=False):
     """Export results to a CSV file with minimal necessary data."""
     filename = get_output_filename(test_mode)
@@ -602,7 +569,6 @@ def main():
     print("YouTube Channel Search Tool")
     print("--------------------------")
 
-    regenerate_keywords = input("Do you want to regenerate keywords for this run? (y/n): ").strip().lower() == 'y'
     test_mode = input("Run in test mode? (y/n): ").strip().lower() == 'y'
     youtube = authenticate_youtube()
 
@@ -662,17 +628,9 @@ def main():
     print(f"Total quota used: ~{total_quota_used} units")
 
 def estimate_channel_quota_usage(videos_processed):
-    """Estimate the API quota usage for a single channel."""
-    # 1 quota unit per 50 videos for playlistItems.list
-    playlist_items_quota = (videos_processed + 49) // 50  # Round up
-
-    # 1 quota unit per 50 videos for videos.list
-    video_details_quota = (videos_processed + 49) // 50  # Round up
-
-    # 100 quota units for fetching channel metadata (channels.list)
-    channel_metadata_quota = 100
-
-    # Total quota usage for this channel
+    playlist_items_quota = (videos_processed + 49) // 50
+    video_details_quota = (videos_processed + 49) // 50
+    channel_metadata_quota = 1
     return playlist_items_quota + video_details_quota + channel_metadata_quota
 
 if __name__ == "__main__":
