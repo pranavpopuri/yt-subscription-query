@@ -3,6 +3,8 @@ youtube_search_cache.json
 youtube_channels_categorized.json
 subscription_ids_cache.json
 channel_urls_cache.json
+test_results/
+youtube_results/
 __pycache__/
 *.pyc
 .env
