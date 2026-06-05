@@ -1,11 +1,13 @@
 client_secret*.json
-youtube_search_cache.json
+token.json
+cache/
 youtube_channels_categorized.json
-subscription_ids_cache.json
-channel_urls_cache.json
 test_results/
 youtube_results/
 __pycache__/
 *.pyc
 .env
-token.json
+# legacy cache files
+youtube_search_cache.json
+subscription_ids_cache.json
+channel_urls_cache.json

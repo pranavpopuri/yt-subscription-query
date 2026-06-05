@@ -1,11 +1,8 @@
-import os
-import json
-from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
 import re
 from functools import lru_cache
 from nltk.stem import PorterStemmer
-from youtube_search import get_video_sample_text, load_cache, save_cache
+from youtube_search import get_video_sample_text
+import cache as cache_mod
 
 _stemmer = PorterStemmer()
 
@@ -17,9 +14,6 @@ def _stem(text: str) -> str:
     """Stem every word in text so keyword matching is form-agnostic."""
     return ' '.join(_stem_word(w) for w in re.findall(r'[a-z]+', text.lower()))
 
-# Configuration
-CLIENT_SECRETS_FILE = "client_secret.json"
-SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 OUTPUT_JSON = "youtube_channels_categorized.json"
 CATEGORIES_CONFIG_FILE = "categories_config.json"
 
@@ -41,12 +35,6 @@ class QuotaTracker:
     def get_quota_used(self):
         return self.quota_used
 
-
-def get_authenticated_service():
-    flow = InstalledAppFlow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, SCOPES)
-    credentials = flow.run_local_server(port=0)
-    return build('youtube', 'v3', credentials=credentials)
 
 
 def get_all_subscribed_channels(youtube, quota_tracker):
@@ -147,14 +135,15 @@ def export_to_json(categorized_data, filename, ordered_categories):
 
 
 def main():
+    import auth
+
     quota_tracker = QuotaTracker()
-    youtube = get_authenticated_service()
+    youtube = auth.build_youtube()
 
     print("Fetching ALL your subscribed channels...")
     channels = get_all_subscribed_channels(youtube, quota_tracker)
     print(f"Found {len(channels)} subscribed channels.")
 
-    # Categorize and prepare export data
     categorized = {
         'metadata': {
             'total_channels': len(channels),
@@ -165,7 +154,7 @@ def main():
     }
 
     config = load_categories_config()
-    cache = load_cache()
+    video_samples = cache_mod.load_video_samples()
 
     # Pass 1: categorize from channel description + title
     temp_categories = {}
@@ -188,16 +177,15 @@ def main():
     if unresolved:
         print(f"\nSampling videos for {len(unresolved)} uncategorized channels...")
         for channel in unresolved:
-            sample = get_video_sample_text(youtube, channel['id'], cache)
+            sample = get_video_sample_text(youtube, channel['id'], video_samples)
             if sample:
-                # get_video_sample_text costs 1 unit (channels.list) + 1 unit (playlistItems.list)
                 quota_tracker.add_quota('channels.list')
                 quota_tracker.add_quota('playlistItems.list')
                 category = categorize_channel(sample, channel['title'], config=config)
             else:
                 category = 'miscellaneous'
             temp_categories.setdefault(category, []).append(channel)
-        save_cache(cache)
+        cache_mod.save_video_samples(video_samples)
 
     # Ensure "no description" is first in the export
     all_categories = list(temp_categories.keys())

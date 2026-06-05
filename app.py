@@ -4,28 +4,15 @@ import time
 
 import streamlit as st
 import pandas as pd
-import googleapiclient.discovery
-import google_auth_oauthlib.flow
+import auth
+import cache as cache_mod
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-CLIENT_SECRETS_FILE = "client_secret.json"
-SCOPES = ["https://www.googleapis.com/auth/youtube"]  # covers readonly ops too
 CATEGORIZED_FILE = "youtube_channels_categorized.json"
-SUBSCRIPTION_CACHE_FILE = "subscription_ids_cache.json"
-CHANNEL_URLS_CACHE_FILE = "channel_urls_cache.json"
 CATEGORIES_CONFIG_FILE = "categories_config.json"
 QUOTA_COST_PER_DELETE = 50
 
 st.set_page_config(page_title="YouTube Manager", page_icon="▶", layout="wide")
-
-# ── Auth ───────────────────────────────────────────────────────────────────────
-def authenticate():
-    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-    flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, SCOPES
-    )
-    credentials = flow.run_local_server(port=0)
-    return googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
 
 def fetch_subs_with_channel_ids(youtube):
     """Fetch subscriptions and return (title→sub_id, title→videos_page_url)."""
@@ -47,15 +34,10 @@ def fetch_subs_with_channel_ids(youtube):
     return subs, channel_urls
 
 def load_channel_urls_cache():
-    try:
-        with open(CHANNEL_URLS_CACHE_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return cache_mod.load_channel_urls()
 
 def save_channel_urls_cache(urls):
-    with open(CHANNEL_URLS_CACHE_FILE, "w") as f:
-        json.dump(urls, f, indent=2)
+    cache_mod.save_channel_urls(urls)
 
 def load_categories_config():
     try:
@@ -71,6 +53,7 @@ def save_categories_config(config):
 # ── Session state ──────────────────────────────────────────────────────────────
 defaults = {
     "youtube": None,
+    "_tried_auto_auth": False,
     "subs": {},
     "channel_urls": {},
     "categories": {},
@@ -81,6 +64,14 @@ defaults = {
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+# Attempt silent auth from cached token once per session
+if st.session_state.youtube is None and not st.session_state._tried_auto_auth:
+    st.session_state._tried_auto_auth = True
+    client = auth.try_cached_auth()
+    if client:
+        st.session_state.youtube = client
+        st.rerun()
 
 if st.session_state.categories_config is None:
     st.session_state.categories_config = load_categories_config()
@@ -93,12 +84,12 @@ with st.sidebar:
         st.warning("Not authenticated")
         if st.button("Sign in with Google", type="primary", use_container_width=True):
             with st.spinner("Opening browser…"):
-                st.session_state.youtube = authenticate()
+                st.session_state.youtube = auth.build_youtube()
             st.rerun()
     else:
         st.success("Signed in")
         if st.button("Switch account", use_container_width=True):
-            st.session_state.youtube = authenticate()
+            st.session_state.youtube = auth.build_youtube(force_reauth=True)
             st.rerun()
     st.divider()
     st.caption("Daily quota: **10,000 units**")
@@ -211,7 +202,7 @@ with tab_categorize:
         QuotaTracker,
         OUTPUT_JSON,
     )
-    from youtube_search import get_video_sample_text, load_cache, save_cache
+    from youtube_search import get_video_sample_text
 
     st.header("Categorize Channels")
     st.caption("Groups all your subscriptions by topic and saves the result for the Unsubscribe tab.")
@@ -223,7 +214,7 @@ with tab_categorize:
             channels = get_all_subscribed_channels(youtube, quota_tracker)
 
         config = load_categories_config()
-        cache = load_cache()
+        video_samples = cache_mod.load_video_samples()
 
         # Pass 1: categorize from description + title
         progress = st.progress(0, text="Categorizing channels…")
@@ -253,14 +244,14 @@ with tab_categorize:
                     (i + 1) / len(unresolved),
                     text=f"Sampling: {channel['title'][:40]}"
                 )
-                sample = get_video_sample_text(youtube, channel["id"], cache)
+                sample = get_video_sample_text(youtube, channel["id"], video_samples)
                 if sample:
                     category = categorize_channel(sample, channel["title"], config=config)
                 else:
                     category = "miscellaneous"
                 temp_categories.setdefault(category, []).append(channel)
             progress2.empty()
-            save_cache(cache)
+            cache_mod.save_video_samples(video_samples)
 
         ordered = ["no description", "miscellaneous"] + [
             c for c in temp_categories if c not in ("no description", "miscellaneous")
@@ -352,8 +343,6 @@ with tab_search:
         get_channel_playlists,
         get_channel_relevance_score,
         search_channel_videos,
-        load_cache,
-        save_cache,
         MAX_RELEVANT_CHANNELS,
     )
 
@@ -381,10 +370,12 @@ with tab_search:
             "title_weight": title_w,
             "playlist_weight": playlist_w,
         }
-        cache = load_cache()
+        subscriptions    = cache_mod.load_subscriptions()
+        channel_metadata = cache_mod.load_channel_metadata()
+        playlist_names   = cache_mod.load_playlist_names()
 
         with st.spinner("Loading subscriptions…"):
-            channels = get_subscribed_channels(youtube, cache)
+            channels = get_subscribed_channels(youtube, subscriptions)
 
         # Rank channels with a progress bar
         rank_progress = st.progress(0, text=f"Ranking {len(channels)} channels…")
@@ -392,16 +383,18 @@ with tab_search:
         for i, channel in enumerate(channels):
             rank_progress.progress((i + 1) / len(channels),
                                    text=f"Ranking: {channel['title'][:40]}")
-            metadata = get_channel_metadata(youtube, channel["id"], cache)
+            metadata = get_channel_metadata(youtube, channel["id"], channel_metadata)
             if not metadata:
                 continue
-            playlist_titles = get_channel_playlists(youtube, channel["id"], cache)
+            playlist_titles = get_channel_playlists(youtube, channel["id"], playlist_names)
             score = get_channel_relevance_score(metadata, query, weights, playlist_titles)
             channel_scores.append((score, channel))
         channel_scores.sort(reverse=True, key=lambda x: x[0]["total_score"])
         relevant = channel_scores[:max_channels]
         rank_progress.empty()
-        save_cache(cache)
+        cache_mod.save_subscriptions(subscriptions.get("channels", []))
+        cache_mod.save_channel_metadata(channel_metadata)
+        cache_mod.save_playlist_names(playlist_names)
 
         # Search each channel
         results = []
@@ -411,10 +404,9 @@ with tab_search:
                 (i + 1) / len(relevant),
                 text=f"Searching: {channel['title'][:40]}"
             )
-            videos = search_channel_videos(youtube, channel, query, cache)
+            videos = search_channel_videos(youtube, channel, query)
             results.extend(videos[:20])
         search_progress.empty()
-        save_cache(cache)
 
         st.session_state.search_results = results
         st.success(f"Found {len(results)} videos across {len(relevant)} channels")

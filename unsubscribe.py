@@ -1,24 +1,10 @@
-import os
-import json
 import time
-import googleapiclient.discovery
-import google_auth_oauthlib.flow
+import json
+import cache as cache_mod
 
-CLIENT_SECRETS_FILE = "client_secret.json"
-SCOPES = ["https://www.googleapis.com/auth/youtube"]
-SUBSCRIPTION_CACHE_FILE = "subscription_ids_cache.json"
 CATEGORIZED_FILE = "youtube_channels_categorized.json"
 SECONDS_BETWEEN_REQUESTS = 0.2
-# Each subscriptions.delete costs 50 quota units; daily limit is 10,000.
 QUOTA_COST_PER_DELETE = 50
-
-
-def authenticate_youtube():
-    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-    flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, SCOPES)
-    credentials = flow.run_local_server(port=0)
-    return googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
 
 
 def fetch_subscriptions(youtube):
@@ -50,16 +36,10 @@ def fetch_subscriptions(youtube):
 
 
 def load_subscription_cache():
-    try:
-        with open(SUBSCRIPTION_CACHE_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
+    return cache_mod.load_subscription_ids().get("ids", {})
 
 def save_subscription_cache(subs):
-    with open(SUBSCRIPTION_CACHE_FILE, "w") as f:
-        json.dump(subs, f, indent=2)
+    cache_mod.save_subscription_ids(subs)
 
 
 def get_subscriptions(youtube, refresh=False):
@@ -221,10 +201,12 @@ def unsubscribe(youtube, subs, to_remove):
 
 
 def main():
+    import auth
+
     print("YouTube Unsubscribe Tool")
     print("========================")
 
-    youtube = authenticate_youtube()
+    youtube = auth.build_youtube()
 
     refresh = input("Refresh subscription list from YouTube? (y/n, default n): ").strip().lower() == "y"
     subs = get_subscriptions(youtube, refresh=refresh)
