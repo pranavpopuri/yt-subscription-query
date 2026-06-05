@@ -226,27 +226,26 @@ def calculate_semantic_similarity(query, text):
     similarity = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
     return round(similarity * 100, 2)  # Convert to percentage and truncate to 2 decimal places
 
-def get_channel_relevance_score(metadata, query, weights):
+def get_channel_relevance_score(metadata, query, weights, playlist_titles=None):
     """
     Calculate channel relevance score with user-defined weights:
     1. Full-query matches in the description (highest weight)
     2. Single-word/phrase keyword matches in the description (medium weight)
-    3. Title matches (lowest weight)
+    3. Title matches (lowest weight, only when description is empty)
+    4. Playlist title matches
     """
     if not metadata:
         return {
             "total_score": 0,
             "description_full_match": 0,
             "description_keyword_match": 0,
-            "title_similarity": 0
+            "title_similarity": 0,
+            "playlist_match": 0,
         }
 
     description = metadata["description"]
     title = metadata["title"]
     core_topics = metadata["core_topics"]
-
-    # Preprocess the query
-    processed_query = preprocess_text(query)
 
     # 1. Full-query matches in the description
     if description.strip():
@@ -266,18 +265,23 @@ def get_channel_relevance_score(metadata, query, weights):
     else:
         title_similarity = 0
 
-    # Weighted combined score
+    # 4. Playlist title matches
+    playlist_text = " ".join(playlist_titles) if playlist_titles else ""
+    playlist_match = calculate_semantic_similarity(query, playlist_text) if playlist_text.strip() else 0
+
     total_score = (
         (description_full_match * weights["description_weight"]) +
         (description_keyword_match * weights["keyword_weight"]) +
-        (title_similarity * weights["title_weight"])
+        (title_similarity * weights["title_weight"]) +
+        (playlist_match * weights.get("playlist_weight", 0.5))
     )
 
     return {
         "total_score": total_score,
         "description_full_match": description_full_match,
         "description_keyword_match": description_keyword_match,
-        "title_similarity": title_similarity
+        "title_similarity": title_similarity,
+        "playlist_match": playlist_match,
     }
 
 def get_most_relevant_channels(youtube, channels, query, cache, weights):
@@ -290,7 +294,8 @@ def get_most_relevant_channels(youtube, channels, query, cache, weights):
         if not metadata:
             continue
 
-        score_details = get_channel_relevance_score(metadata, query, weights)
+        playlist_titles = get_channel_playlists(youtube, channel["id"], cache)
+        score_details = get_channel_relevance_score(metadata, query, weights, playlist_titles)
         channel_scores.append((score_details, channel))
         print(f"  {channel['title'][:30]}... Score: {score_details['total_score']:.1f}", end='\r')
 
@@ -350,6 +355,33 @@ def get_uploads_playlist_id(youtube, channel_id):
     except Exception as e:
         print(f"Error fetching uploads playlist for channel {channel_id}: {e}")
         return None
+
+def get_channel_playlists(youtube, channel_id, cache):
+    """Return list of playlist titles for a channel, fetching and caching on first access."""
+    playlist_names = cache.setdefault("playlist_names", {})
+    if channel_id in playlist_names:
+        return playlist_names[channel_id]
+
+    titles = []
+    next_page_token = None
+    try:
+        while True:
+            response = youtube.playlists().list(
+                part="snippet",
+                channelId=channel_id,
+                maxResults=50,
+                pageToken=next_page_token,
+                fields="items(snippet/title),nextPageToken"
+            ).execute()
+            titles.extend(item["snippet"]["title"] for item in response.get("items", []))
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break
+    except Exception as e:
+        print(f"Error fetching playlists for channel {channel_id}: {e}")
+
+    playlist_names[channel_id] = titles
+    return titles
 
 def get_video_sample_text(youtube, channel_id, cache, n=5):
     """Return combined title+description text from the n most recent videos.
@@ -602,6 +634,7 @@ def main():
         print(f"  Relevance Score:")
         print(f"    Description Similarity: {score_details['description_full_match']}%")
         print(f"    Keyword Similarity: {score_details['description_keyword_match']}%")
+        print(f"    Playlist Match: {score_details['playlist_match']}%")
         if not channel.get("description", "").strip():
             print(f"    Title Matches (used due to empty description): {'True' if score_details['title_similarity'] > 0 else 'False'}")
         print(f"    Total Score: {score_details['total_score']:.1f}")

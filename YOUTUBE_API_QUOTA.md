@@ -11,6 +11,7 @@ Daily quota: **10,000 units** per Google Cloud project, resets at midnight Pacif
 | `subscriptions.list` | 1 unit per page (50 subs/page) | Both scripts |
 | `subscriptions.delete` | **50 units** per channel | `unsubscribe.py` |
 | `channels.list` (any part) | 1 unit per call | `youtube_search.py` |
+| `playlists.list` | 1 unit per call (50 playlists/page) | `youtube_search.py` |
 | `playlistItems.list` | 1 unit per page (50 videos/page) | `youtube_search.py` |
 | `videos.list` | 1 unit per 50 videos | `youtube_search.py` |
 | `search.list` | 100 units per call | **Not used** (avoided by fetching uploads playlist directly) |

@@ -349,6 +349,7 @@ with tab_search:
     from youtube_search import (
         get_subscribed_channels,
         get_channel_metadata,
+        get_channel_playlists,
         get_channel_relevance_score,
         search_channel_videos,
         load_cache,
@@ -362,13 +363,15 @@ with tab_search:
     query = st.text_input("Search query", placeholder="e.g. dynamic programming, transformer architecture")
 
     with st.expander("Scoring weights & limits"):
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         desc_w = c1.slider("Description", 0.0, 2.0, 1.0, 0.05,
                            help="Weight for full-description semantic similarity")
         kw_w   = c2.slider("Keywords",    0.0, 1.0, 0.25, 0.05,
                            help="Weight for keyword matches in description")
         title_w = c3.slider("Title",      0.0, 1.0, 0.1, 0.05,
                             help="Weight for title similarity (only used when description is empty)")
+        playlist_w = c4.slider("Playlists", 0.0, 1.0, 0.5, 0.05,
+                               help="Weight for playlist title matches")
         max_channels = st.slider("Max channels to search", 1, MAX_RELEVANT_CHANNELS, 20)
 
     if st.button("Search", type="primary", disabled=not bool(query)):
@@ -376,6 +379,7 @@ with tab_search:
             "description_weight": desc_w,
             "keyword_weight": kw_w,
             "title_weight": title_w,
+            "playlist_weight": playlist_w,
         }
         cache = load_cache()
 
@@ -391,7 +395,8 @@ with tab_search:
             metadata = get_channel_metadata(youtube, channel["id"], cache)
             if not metadata:
                 continue
-            score = get_channel_relevance_score(metadata, query, weights)
+            playlist_titles = get_channel_playlists(youtube, channel["id"], cache)
+            score = get_channel_relevance_score(metadata, query, weights, playlist_titles)
             channel_scores.append((score, channel))
         channel_scores.sort(reverse=True, key=lambda x: x[0]["total_score"])
         relevant = channel_scores[:max_channels]
